@@ -1,0 +1,380 @@
+-- ================================================================
+--  WaypointUI.lua  |  LocalScript → StarterPlayerScripts
+-- ================================================================
+--  Features:
+--    ◆ Draggable title bar — mouse & touch (mobile-compatible)
+--    ◆ Minimize / expand with smooth tween animation
+--    ◆ [📍 Set Waypoint]    saves your current position + spawns
+--                            a spinning neon disc marker in-world
+--    ◆ [⚡ Teleport Here]   moves you instantly to the waypoint
+--    ◆ [🗑 Delete Waypoint] removes waypoint & world marker
+--    ◆ Live distance counter (color-coded: far / close / arrived)
+--    ◆ Teleport / Delete buttons auto-dim when no waypoint is set
+--    ◆ Respawn-safe character tracking
+-- ================================================================
+
+local Players          = game:GetService("Players")
+local RunService       = game:GetService("RunService")
+local TweenService     = game:GetService("TweenService")
+local UserInputService = game:GetService("UserInputService")
+
+local player    = Players.LocalPlayer
+local playerGui = player:WaitForChild("PlayerGui")
+
+-- ── Character helpers (respawn-safe) ─────────────────────────
+local chr, hrp, hum
+
+local function grabChar(c)
+	chr = c
+	hrp = c:WaitForChild("HumanoidRootPart")
+	hum = c:WaitForChild("Humanoid")
+end
+
+if player.Character then grabChar(player.Character) end
+player.CharacterAdded:Connect(grabChar)
+
+-- ── State ─────────────────────────────────────────────────────
+local waypointCF  = nil   -- saved CFrame
+local markerPart  = nil   -- world Part
+local markerConn  = nil   -- RunService spin connection
+local minimized   = false
+
+-- ── Palette & layout constants ────────────────────────────────
+local BG       = Color3.fromRGB(14,  14,  22)
+local TITLE_BG = Color3.fromRGB(24,  24,  42)
+local STROKE   = Color3.fromRGB(85, 130, 255)
+local C_SET    = Color3.fromRGB(55, 120, 255)
+local C_TP     = Color3.fromRGB(45, 180, 110)
+local C_DEL    = Color3.fromRGB(210,  60,  60)
+local C_DIM    = Color3.fromRGB(35,  35,  55)
+
+local W      = 232
+local H_FULL = 256   -- title + padding + status + 3 buttons + gaps
+local H_MINI = 42
+local EASE   = TweenInfo.new(0.22, Enum.EasingStyle.Quart, Enum.EasingDirection.Out)
+
+-- ═══════════════════════════════════════════════════════════════
+--  BUILD GUI
+-- ═══════════════════════════════════════════════════════════════
+
+local sg = Instance.new("ScreenGui")
+sg.Name           = "WaypointUI"
+sg.ResetOnSpawn   = false
+sg.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+sg.Parent         = playerGui
+
+-- ── Main container ────────────────────────────────────────────
+local main = Instance.new("Frame")
+main.Name             = "Main"
+main.Size             = UDim2.fromOffset(W, H_FULL)
+main.Position         = UDim2.fromOffset(20, 90)
+main.BackgroundColor3 = BG
+main.BorderSizePixel  = 0
+main.ClipsDescendants = true
+main.Parent           = sg
+
+do
+	local c = Instance.new("UICorner", main); c.CornerRadius = UDim.new(0, 12)
+	local s = Instance.new("UIStroke",  main); s.Color = STROKE; s.Thickness = 1.5
+end
+
+-- ── Title bar ─────────────────────────────────────────────────
+local bar = Instance.new("Frame")
+bar.Name             = "TitleBar"
+bar.Size             = UDim2.new(1, 0, 0, H_MINI)
+bar.BackgroundColor3 = TITLE_BG
+bar.BorderSizePixel  = 0
+bar.Parent           = main
+
+Instance.new("UICorner", bar).CornerRadius = UDim.new(0, 12)
+
+-- Patch the bottom-rounded corners of the bar so it looks flush
+local barPatch = Instance.new("Frame", bar)
+barPatch.Size             = UDim2.new(1, 0, 0.5, 0)
+barPatch.Position         = UDim2.new(0, 0, 0.5, 0)
+barPatch.BackgroundColor3 = TITLE_BG
+barPatch.BorderSizePixel  = 0
+
+-- Pin icon
+local pinIcon = Instance.new("TextLabel", bar)
+pinIcon.Size                = UDim2.fromOffset(H_MINI, H_MINI)
+pinIcon.BackgroundTransparency = 1
+pinIcon.Text                = "📍"
+pinIcon.TextSize            = 17
+pinIcon.Font                = Enum.Font.GothamBold
+pinIcon.TextColor3          = Color3.new(1, 1, 1)
+pinIcon.TextXAlignment      = Enum.TextXAlignment.Center
+
+-- Title text
+local titleTxt = Instance.new("TextLabel", bar)
+titleTxt.Size               = UDim2.new(1, -88, 1, 0)
+titleTxt.Position           = UDim2.fromOffset(H_MINI, 0)
+titleTxt.BackgroundTransparency = 1
+titleTxt.Text               = "Waypoint"
+titleTxt.TextSize           = 14
+titleTxt.Font               = Enum.Font.GothamBold
+titleTxt.TextColor3         = Color3.fromRGB(205, 220, 255)
+titleTxt.TextXAlignment     = Enum.TextXAlignment.Left
+
+-- Minimize / expand button
+local minBtn = Instance.new("TextButton", bar)
+minBtn.Name             = "MinBtn"
+minBtn.Size             = UDim2.fromOffset(28, 28)
+minBtn.Position         = UDim2.new(1, -35, 0.5, -14)
+minBtn.BackgroundColor3 = Color3.fromRGB(48, 48, 75)
+minBtn.BorderSizePixel  = 0
+minBtn.Text             = "−"
+minBtn.TextSize         = 18
+minBtn.Font             = Enum.Font.GothamBold
+minBtn.TextColor3       = Color3.fromRGB(190, 200, 255)
+minBtn.AutoButtonColor  = false
+Instance.new("UICorner", minBtn).CornerRadius = UDim.new(0, 6)
+
+-- ── Content panel ─────────────────────────────────────────────
+local panel = Instance.new("Frame", main)
+panel.Name                 = "Panel"
+panel.Size                 = UDim2.new(1, 0, 1, -H_MINI)
+panel.Position             = UDim2.fromOffset(0, H_MINI)
+panel.BackgroundTransparency = 1
+
+do
+	local p = Instance.new("UIPadding", panel)
+	p.PaddingLeft   = UDim.new(0, 12)
+	p.PaddingRight  = UDim.new(0, 12)
+	p.PaddingTop    = UDim.new(0, 10)
+	p.PaddingBottom = UDim.new(0, 10)
+
+	local l = Instance.new("UIListLayout", panel)
+	l.FillDirection       = Enum.FillDirection.Vertical
+	l.Padding             = UDim.new(0, 8)
+	l.HorizontalAlignment = Enum.HorizontalAlignment.Center
+	l.VerticalAlignment   = Enum.VerticalAlignment.Top
+end
+
+-- Status / distance label
+local status = Instance.new("TextLabel", panel)
+status.Size               = UDim2.new(1, 0, 0, 30)
+status.BackgroundColor3   = Color3.fromRGB(20, 20, 36)
+status.BorderSizePixel    = 0
+status.Text               = "No waypoint set"
+status.TextSize           = 11
+status.Font               = Enum.Font.Gotham
+status.TextColor3         = Color3.fromRGB(125, 125, 160)
+status.TextXAlignment     = Enum.TextXAlignment.Center
+status.TextWrapped        = true
+Instance.new("UICorner", status).CornerRadius = UDim.new(0, 8)
+
+-- ── Button factory ────────────────────────────────────────────
+local function mkBtn(label, col)
+	local b = Instance.new("TextButton", panel)
+	b.Size             = UDim2.new(1, 0, 0, 46)
+	b.BackgroundColor3 = col
+	b.BorderSizePixel  = 0
+	b.AutoButtonColor  = false
+	b.Text             = label
+	b.TextSize         = 13
+	b.Font             = Enum.Font.GothamBold
+	b.TextColor3       = Color3.new(1, 1, 1)
+	Instance.new("UICorner", b).CornerRadius = UDim.new(0, 9)
+
+	-- Press-scale feedback (works on touch too)
+	b.MouseButton1Down:Connect(function()
+		TweenService:Create(b, TweenInfo.new(0.07), {Size = UDim2.new(0.965, 0, 0, 46)}):Play()
+	end)
+	b.MouseButton1Up:Connect(function()
+		TweenService:Create(b, TweenInfo.new(0.1), {Size = UDim2.new(1, 0, 0, 46)}):Play()
+	end)
+
+	return b
+end
+
+local setBtn = mkBtn("📍   Set Waypoint",    C_SET)
+local tpBtn  = mkBtn("⚡   Teleport Here",   C_TP)
+local delBtn = mkBtn("🗑   Delete Waypoint", C_DEL)
+
+-- ═══════════════════════════════════════════════════════════════
+--  WORLD MARKER
+-- ═══════════════════════════════════════════════════════════════
+
+local function spawnMarker(cf)
+	-- Clean up previous marker
+	if markerPart then markerPart:Destroy()    end
+	if markerConn then markerConn:Disconnect() end
+
+	local pos = cf.Position
+
+	markerPart = Instance.new("Part", workspace)
+	markerPart.Name       = "WaypointMarker"
+	markerPart.Anchored   = true
+	markerPart.CanCollide = false
+	markerPart.CastShadow = false
+	markerPart.Size       = Vector3.new(3, 0.25, 3)
+	markerPart.Material   = Enum.Material.Neon
+	markerPart.Color      = Color3.fromRGB(90, 145, 255)
+	markerPart.CFrame     = CFrame.new(pos)
+
+	-- Flat spinning disc
+	local mesh = Instance.new("SpecialMesh", markerPart)
+	mesh.MeshType = Enum.MeshType.Cylinder
+	mesh.Scale    = Vector3.new(0.12, 3, 3)
+
+	-- World-space billboard label (always faces camera, always on top)
+	local bb = Instance.new("BillboardGui", markerPart)
+	bb.Size        = UDim2.fromOffset(95, 28)
+	bb.StudsOffset = Vector3.new(0, 5, 0)
+	bb.AlwaysOnTop = true
+
+	local bLbl = Instance.new("TextLabel", bb)
+	bLbl.Size                 = UDim2.new(1, 0, 1, 0)
+	bLbl.BackgroundColor3     = BG
+	bLbl.BackgroundTransparency = 0.2
+	bLbl.Text                 = "📍 Waypoint"
+	bLbl.TextSize             = 13
+	bLbl.Font                 = Enum.Font.GothamBold
+	bLbl.TextColor3           = Color3.new(1, 1, 1)
+	bLbl.TextXAlignment       = Enum.TextXAlignment.Center
+	Instance.new("UICorner", bLbl).CornerRadius = UDim.new(0, 6)
+
+	-- Spin loop
+	local ang = 0
+	markerConn = RunService.Heartbeat:Connect(function(dt)
+		if not markerPart or not markerPart.Parent then
+			markerConn:Disconnect()
+			return
+		end
+		ang = ang + dt * 50
+		markerPart.CFrame = CFrame.new(pos) * CFrame.Angles(0, math.rad(ang), 0)
+	end)
+end
+
+local function destroyMarker()
+	if markerPart then markerPart:Destroy();    markerPart = nil end
+	if markerConn then markerConn:Disconnect(); markerConn = nil end
+end
+
+-- ═══════════════════════════════════════════════════════════════
+--  BUTTON ENABLE / DISABLE
+-- ═══════════════════════════════════════════════════════════════
+
+local function setEnabled(btn, on, activeCol)
+	btn.Interactable     = on
+	btn.BackgroundColor3 = on and activeCol or C_DIM
+	btn.TextColor3       = on and Color3.new(1, 1, 1) or Color3.fromRGB(85, 85, 110)
+end
+
+local function refreshButtons()
+	local has = waypointCF ~= nil
+	setEnabled(tpBtn,  has, C_TP)
+	setEnabled(delBtn, has, C_DEL)
+end
+
+refreshButtons()
+
+-- ═══════════════════════════════════════════════════════════════
+--  BUTTON LOGIC
+-- ═══════════════════════════════════════════════════════════════
+
+setBtn.MouseButton1Click:Connect(function()
+	if not hrp then return end
+	waypointCF = hrp.CFrame
+	spawnMarker(waypointCF)
+	refreshButtons()
+	status.Text       = "✅  Waypoint saved!"
+	status.TextColor3 = Color3.fromRGB(100, 200, 255)
+end)
+
+tpBtn.MouseButton1Click:Connect(function()
+	if not (waypointCF and hrp) then return end
+	-- Offset upward slightly so player doesn't clip into the ground
+	hrp.CFrame        = waypointCF + Vector3.new(0, 3.5, 0)
+	status.Text       = "⚡  Teleported!"
+	status.TextColor3 = Color3.fromRGB(80, 235, 140)
+end)
+
+delBtn.MouseButton1Click:Connect(function()
+	if not waypointCF then return end
+	waypointCF = nil
+	destroyMarker()
+	refreshButtons()
+	status.Text       = "🗑  Waypoint deleted"
+	status.TextColor3 = Color3.fromRGB(220, 70, 70)
+	-- Reset text after a short pause
+	task.delay(2.5, function()
+		if not waypointCF then
+			status.Text       = "No waypoint set"
+			status.TextColor3 = Color3.fromRGB(125, 125, 160)
+		end
+	end)
+end)
+
+-- ── Live distance display ─────────────────────────────────────
+RunService.Heartbeat:Connect(function()
+	if not (waypointCF and hrp) then return end
+	local dist = math.round((hrp.Position - waypointCF.Position).Magnitude)
+	if dist <= 6 then
+		status.Text       = "✅  You're here!  (" .. dist .. " studs)"
+		status.TextColor3 = Color3.fromRGB(80, 235, 140)
+	elseif dist <= 50 then
+		status.Text       = "📍  " .. dist .. " studs  ·  getting close!"
+		status.TextColor3 = Color3.fromRGB(255, 210, 60)
+	else
+		status.Text       = "📍  " .. dist .. " studs away"
+		status.TextColor3 = Color3.fromRGB(110, 195, 255)
+	end
+end)
+
+-- ═══════════════════════════════════════════════════════════════
+--  MINIMIZE / EXPAND
+-- ═══════════════════════════════════════════════════════════════
+
+minBtn.MouseButton1Click:Connect(function()
+	minimized   = not minimized
+	minBtn.Text = minimized and "+" or "−"
+	TweenService:Create(main, EASE, {
+		Size = UDim2.fromOffset(W, minimized and H_MINI or H_FULL)
+	}):Play()
+	if minimized then
+		panel.Visible = false
+	else
+		task.delay(0.14, function() panel.Visible = true end)
+	end
+end)
+
+-- ═══════════════════════════════════════════════════════════════
+--  DRAGGING — title bar, mouse + touch
+-- ═══════════════════════════════════════════════════════════════
+
+local dragActive  = false
+local dragInp     = nil
+local dragStart   = nil
+local dragPos0    = nil
+
+-- Attach drag to the title bar so the minimize button doesn't conflict
+-- (TextButton children consume input before it reaches the parent Frame)
+bar.InputBegan:Connect(function(inp)
+	if inp.UserInputType ~= Enum.UserInputType.MouseButton1
+	and inp.UserInputType ~= Enum.UserInputType.Touch then return end
+	dragActive = true
+	dragInp    = inp
+	dragStart  = inp.Position
+	dragPos0   = main.Position
+end)
+
+UserInputService.InputChanged:Connect(function(inp)
+	if not dragActive or inp ~= dragInp then return end
+	local d  = inp.Position - dragStart
+	local ss = sg.AbsoluteSize
+	local fs = main.AbsoluteSize
+	-- Clamp so the window can't be dragged off-screen
+	main.Position = UDim2.fromOffset(
+		math.clamp(dragPos0.X.Offset + d.X, 0, ss.X - fs.X),
+		math.clamp(dragPos0.Y.Offset + d.Y, 0, ss.Y - fs.Y)
+	)
+end)
+
+UserInputService.InputEnded:Connect(function(inp)
+	if inp == dragInp then
+		dragActive = false
+		dragInp    = nil
+	end
+end)
