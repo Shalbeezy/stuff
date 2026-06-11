@@ -1,0 +1,291 @@
+--!strict
+-- SpeedFunction UI | LocalScript -> StarterPlayerScripts
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+
+local player = Players.LocalPlayer
+local playerGui = player:WaitForChild("PlayerGui")
+
+local MAX_SPEED = 200
+local GRAPH_SAMPLES = 80
+
+--========================================================
+-- FUNCTION LIBRARY  (p = parameter array, t = time)
+--========================================================
+local FUNCTIONS = {
+    {name = "Linear",       params = {{"a (slope)",2},{"b (base)",16}},                         f = function(t,p) return p[1]*t + p[2] end},
+    {name = "Quadratic",    params = {{"a",0.5},{"b",0},{"c",16}},                              f = function(t,p) return p[1]*t^2 + p[2]*t + p[3] end},
+    {name = "Cubic",        params = {{"a",0.1},{"b",0},{"c",0},{"d",16}},                      f = function(t,p) return p[1]*t^3 + p[2]*t^2 + p[3]*t + p[4] end},
+    {name = "Sine",         params = {{"amp",20},{"freq",1},{"phase",0},{"base",30}},           f = function(t,p) return p[1]*math.sin(p[2]*t + p[3]) + p[4] end},
+    {name = "Cosine",       params = {{"amp",20},{"freq",1},{"phase",0},{"base",30}},           f = function(t,p) return p[1]*math.cos(p[2]*t + p[3]) + p[4] end},
+    {name = "Tangent",      params = {{"a",5},{"b",0.5},{"base",30}},                           f = function(t,p) return math.clamp(p[1]*math.tan(p[2]*t), -100, 100) + p[3] end},
+    {name = "Exponential",  params = {{"a",16},{"b (rate)",0.2}},                               f = function(t,p) return p[1]*math.exp(p[2]*t) end},
+    {name = "Logarithmic",  params = {{"a",15},{"b",1},{"c",16}},                               f = function(t,p) return p[1]*math.log(math.max(p[2]*t,0)+1) + p[3] end},
+    {name = "Square Root",  params = {{"a",15},{"b",1},{"c",16}},                               f = function(t,p) return p[1]*math.sqrt(math.max(p[2]*t,0)) + p[3] end},
+    {name = "Absolute V",   params = {{"a",8},{"center",5},{"base",16}},                        f = function(t,p) return p[1]*math.abs(t - p[2]) + p[3] end},
+    {name = "Sigmoid",      params = {{"max",60},{"steep",1},{"midpoint",5}},                   f = function(t,p) return p[1]/(1 + math.exp(-p[2]*(t - p[3]))) end},
+    {name = "Gaussian",     params = {{"peak",50},{"center",5},{"width",1.5},{"base",16}},      f = function(t,p) return p[1]*math.exp(-((t-p[2])^2)/(2*math.max(p[3],0.01)^2)) + p[4] end},
+    {name = "Sawtooth",     params = {{"amp",30},{"freq",0.5},{"base",16}},                     f = function(t,p) return p[1]*((t*p[2])%1) + p[3] end},
+    {name = "Square Wave",  params = {{"high",50},{"low",16},{"freq",0.5}},                     f = function(t,p) return ((t*p[3])%1 < 0.5) and p[1] or p[2] end},
+    {name = "Triangle Wave",params = {{"amp",30},{"freq",0.5},{"base",16}},                     f = function(t,p) local x=(t*p[2])%1 return p[1]*(1-math.abs(2*x-1)) + p[3] end},
+    {name = "Damped Sine",  params = {{"amp",40},{"freq",3},{"decay",0.3},{"base",30}},         f = function(t,p) return p[1]*math.exp(-p[3]*t)*math.sin(p[2]*t) + p[4] end},
+    {name = "Bounce",       params = {{"amp",40},{"freq",3},{"decay",0.25},{"base",16}},        f = function(t,p) return p[1]*math.abs(math.sin(p[2]*t))*math.exp(-p[3]*t) + p[4] end},
+    {name = "Step",         params = {{"step size",8},{"interval",2},{"base",16}},              f = function(t,p) return p[3] + p[1]*math.floor(t/math.max(p[2],0.01)) end},
+    {name = "Power",        params = {{"a",4},{"exponent",1.5},{"base",16}},                    f = function(t,p) return p[1]*math.max(t,0)^p[2] + p[3] end},
+    {name = "Reciprocal",   params = {{"a",100},{"b",1},{"base",10}},                           f = function(t,p) return p[1]/(t + math.max(p[2],0.01)) + p[3] end},
+}
+
+--========================================================
+-- UI HELPERS
+--========================================================
+local function new(class, props, parent)
+    local o = Instance.new(class)
+    for k,v in pairs(props) do (o :: any)[k] = v end
+    o.Parent = parent
+    return o
+end
+
+local gui = new("ScreenGui", {Name="SpeedFunctionUI", ResetOnSpawn=false, ZIndexBehavior=Enum.ZIndexBehavior.Sibling}, playerGui)
+
+local main = new("Frame", {Size=UDim2.fromOffset(640,360), Position=UDim2.fromOffset(80,80),
+    BackgroundColor3=Color3.fromRGB(28,28,34), BorderSizePixel=0, Active=true}, gui)
+new("UICorner", {CornerRadius=UDim.new(0,8)}, main)
+
+-- Title bar (drag + minimize)
+local titleBar = new("Frame", {Size=UDim2.new(1,0,0,32), BackgroundColor3=Color3.fromRGB(40,40,50), BorderSizePixel=0}, main)
+new("UICorner", {CornerRadius=UDim.new(0,8)}, titleBar)
+new("TextLabel", {Size=UDim2.new(1,-70,1,0), Position=UDim2.fromOffset(12,0), BackgroundTransparency=1,
+    Text="Speed Function Lab", Font=Enum.Font.GothamBold, TextSize=15, TextColor3=Color3.new(1,1,1),
+    TextXAlignment=Enum.TextXAlignment.Left}, titleBar)
+local minBtn = new("TextButton", {Size=UDim2.fromOffset(28,24), Position=UDim2.new(1,-34,0,4),
+    BackgroundColor3=Color3.fromRGB(60,60,75), Text="–", TextSize=18, Font=Enum.Font.GothamBold,
+    TextColor3=Color3.new(1,1,1), BorderSizePixel=0}, titleBar)
+new("UICorner", {CornerRadius=UDim.new(0,6)}, minBtn)
+
+local body = new("Frame", {Size=UDim2.new(1,0,1,-32), Position=UDim2.fromOffset(0,32), BackgroundTransparency=1}, main)
+
+-- Minimize toggle
+local minimized = false
+minBtn.MouseButton1Click:Connect(function()
+    minimized = not minimized
+    body.Visible = not minimized
+    main.Size = minimized and UDim2.fromOffset(640,32) or UDim2.fromOffset(640,360)
+    minBtn.Text = minimized and "+" or "–"
+end)
+
+-- Dragging
+do
+    local dragging, dragStart, startPos = false, Vector2.zero, UDim2.new()
+    titleBar.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            dragging, dragStart, startPos = true, input.Position, main.Position
+        end
+    end)
+    UserInputService.InputChanged:Connect(function(input)
+        if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+            local d = input.Position - dragStart
+            main.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + d.X, startPos.Y.Scale, startPos.Y.Offset + d.Y)
+        end
+    end)
+    UserInputService.InputEnded:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then dragging = false end
+    end)
+end
+
+--========================================================
+-- LAYOUT: function list | inputs | graph
+--========================================================
+local listFrame = new("ScrollingFrame", {Size=UDim2.new(0,150,1,-10), Position=UDim2.fromOffset(8,5),
+    BackgroundColor3=Color3.fromRGB(35,35,42), BorderSizePixel=0, ScrollBarThickness=4,
+    CanvasSize=UDim2.fromOffset(0, #FUNCTIONS*30 + 6)}, body)
+new("UICorner", {CornerRadius=UDim.new(0,6)}, listFrame)
+new("UIListLayout", {Padding=UDim.new(0,4), HorizontalAlignment=Enum.HorizontalAlignment.Center,
+    SortOrder=Enum.SortOrder.LayoutOrder}, listFrame)
+
+local inputPanel = new("Frame", {Size=UDim2.new(0,180,1,-10), Position=UDim2.fromOffset(166,5),
+    BackgroundColor3=Color3.fromRGB(35,35,42), BorderSizePixel=0}, body)
+new("UICorner", {CornerRadius=UDim.new(0,6)}, inputPanel)
+
+local graphPanel = new("Frame", {Size=UDim2.new(1,-362,1,-10), Position=UDim2.fromOffset(354,5),
+    BackgroundColor3=Color3.fromRGB(18,18,22), BorderSizePixel=0, ClipsDescendants=true}, body)
+new("UICorner", {CornerRadius=UDim.new(0,6)}, graphPanel)
+
+local graphArea = new("Frame", {Size=UDim2.new(1,-20,1,-44), Position=UDim2.fromOffset(10,10), BackgroundTransparency=1}, graphPanel)
+local graphInfo = new("TextLabel", {Size=UDim2.new(1,-20,0,24), Position=UDim2.new(0,10,1,-30),
+    BackgroundTransparency=1, Text="Select a function", Font=Enum.Font.Gotham, TextSize=13,
+    TextColor3=Color3.fromRGB(180,180,200), TextXAlignment=Enum.TextXAlignment.Left}, graphPanel)
+
+-- Indicator dot
+local indicator = new("Frame", {Size=UDim2.fromOffset(10,10), AnchorPoint=Vector2.new(0.5,0.5),
+    BackgroundColor3=Color3.fromRGB(255,80,80), Visible=false, ZIndex=5}, graphArea)
+new("UICorner", {CornerRadius=UDim.new(1,0)}, indicator)
+
+--========================================================
+-- STATE
+--========================================================
+local selectedFn = nil
+local paramBoxes = {}
+local durationBox = nil
+local segmentPool = {}
+local sampled = {min=0, max=1, values={}}
+local running = false
+local listButtons = {}
+
+local function getParams()
+    local p = {}
+    for i, box in ipairs(paramBoxes) do
+        p[i] = tonumber(box.Text) or selectedFn.params[i][2]
+    end
+    return p
+end
+
+local function getDuration()
+    return math.max(tonumber(durationBox and durationBox.Text or "") or 10, 0.5)
+end
+
+--========================================================
+-- GRAPH RENDERING (line segments from a frame pool)
+--========================================================
+local function drawGraph()
+    if not selectedFn then return end
+    local p, dur = getParams(), getDuration()
+    local vals, vmin, vmax = {}, math.huge, -math.huge
+    for i = 0, GRAPH_SAMPLES do
+        local ok, v = pcall(selectedFn.f, (i/GRAPH_SAMPLES)*dur, p)
+        v = (ok and typeof(v)=="number" and v==v) and math.clamp(v, -1e4, 1e4) or 0
+        vals[i+1] = v
+        vmin, vmax = math.min(vmin,v), math.max(vmax,v)
+    end
+    if vmax - vmin < 1e-3 then vmax = vmin + 1 end
+    sampled = {min=vmin, max=vmax, values=vals}
+
+    local w, h = graphArea.AbsoluteSize.X, graphArea.AbsoluteSize.Y
+    for i = 1, GRAPH_SAMPLES do
+        local seg = segmentPool[i]
+        if not seg then
+            seg = new("Frame", {BackgroundColor3=Color3.fromRGB(90,200,255), BorderSizePixel=0,
+                AnchorPoint=Vector2.new(0.5,0.5), ZIndex=3}, graphArea)
+            segmentPool[i] = seg
+        end
+        local x1 = (i-1)/GRAPH_SAMPLES*w
+        local x2 = i/GRAPH_SAMPLES*w
+        local y1 = h - ((vals[i]-vmin)/(vmax-vmin))*h
+        local y2 = h - ((vals[i+1]-vmin)/(vmax-vmin))*h
+        local dx, dy = x2-x1, y2-y1
+        local len = math.sqrt(dx*dx + dy*dy)
+        seg.Visible = true
+        seg.Size = UDim2.fromOffset(math.max(len,1), 2)
+        seg.Position = UDim2.fromOffset((x1+x2)/2, (y1+y2)/2)
+        seg.Rotation = math.deg(math.atan2(dy, dx))
+    end
+    graphInfo.Text = string.format("%s | y: %.1f to %.1f | t: 0 to %.1fs", selectedFn.name, vmin, vmax, dur)
+end
+
+--========================================================
+-- INPUT PANEL BUILD
+--========================================================
+local execBtn, stopBtn, loopBtn, loopOn = nil, nil, nil, false
+
+local function buildInputs(fnDef)
+    selectedFn = fnDef
+    paramBoxes = {}
+    for _, c in ipairs(inputPanel:GetChildren()) do
+        if not c:IsA("UICorner") then c:Destroy() end
+    end
+    new("TextLabel", {Size=UDim2.new(1,-16,0,22), Position=UDim2.fromOffset(8,6), BackgroundTransparency=1,
+        Text=fnDef.name, Font=Enum.Font.GothamBold, TextSize=15, TextColor3=Color3.fromRGB(90,200,255),
+        TextXAlignment=Enum.TextXAlignment.Left}, inputPanel)
+
+    local y = 32
+    local function addRow(labelText, default)
+        new("TextLabel", {Size=UDim2.fromOffset(80,22), Position=UDim2.fromOffset(8,y), BackgroundTransparency=1,
+            Text=labelText, Font=Enum.Font.Gotham, TextSize=12, TextColor3=Color3.fromRGB(210,210,220),
+            TextXAlignment=Enum.TextXAlignment.Left}, inputPanel)
+        local box = new("TextBox", {Size=UDim2.fromOffset(80,22), Position=UDim2.fromOffset(92,y),
+            BackgroundColor3=Color3.fromRGB(50,50,62), Text=tostring(default), Font=Enum.Font.Gotham,
+            TextSize=13, TextColor3=Color3.new(1,1,1), BorderSizePixel=0, ClearTextOnFocus=false}, inputPanel)
+        new("UICorner", {CornerRadius=UDim.new(0,4)}, box)
+        box:GetPropertyChangedSignal("Text"):Connect(drawGraph)
+        y += 28
+        return box
+    end
+
+    for _, def in ipairs(fnDef.params) do
+        table.insert(paramBoxes, addRow(def[1], def[2]))
+    end
+    durationBox = addRow("duration (s)", 10)
+
+    execBtn = new("TextButton", {Size=UDim2.new(1,-16,0,28), Position=UDim2.new(0,8,1,-72),
+        BackgroundColor3=Color3.fromRGB(60,160,90), Text="Execute", Font=Enum.Font.GothamBold,
+        TextSize=14, TextColor3=Color3.new(1,1,1), BorderSizePixel=0}, inputPanel)
+    new("UICorner", {CornerRadius=UDim.new(0,6)}, execBtn)
+
+    stopBtn = new("TextButton", {Size=UDim2.new(0.5,-12,0,24), Position=UDim2.new(0,8,1,-38),
+        BackgroundColor3=Color3.fromRGB(170,70,70), Text="Stop", Font=Enum.Font.GothamBold,
+        TextSize=13, TextColor3=Color3.new(1,1,1), BorderSizePixel=0}, inputPanel)
+    new("UICorner", {CornerRadius=UDim.new(0,6)}, stopBtn)
+
+    loopBtn = new("TextButton", {Size=UDim2.new(0.5,-12,0,24), Position=UDim2.new(0.5,4,1,-38),
+        BackgroundColor3=Color3.fromRGB(60,60,75), Text="Loop: OFF", Font=Enum.Font.GothamBold,
+        TextSize=13, TextColor3=Color3.new(1,1,1), BorderSizePixel=0}, inputPanel)
+    new("UICorner", {CornerRadius=UDim.new(0,6)}, loopBtn)
+
+    loopBtn.MouseButton1Click:Connect(function()
+        loopOn = not loopOn
+        loopBtn.Text = loopOn and "Loop: ON" or "Loop: OFF"
+        loopBtn.BackgroundColor3 = loopOn and Color3.fromRGB(90,120,200) or Color3.fromRGB(60,60,75)
+    end)
+    execBtn.MouseButton1Click:Connect(function() running = true end)
+    stopBtn.MouseButton1Click:Connect(function() running = false end)
+    drawGraph()
+end
+
+-- Function list buttons
+for idx, fnDef in ipairs(FUNCTIONS) do
+    local btn = new("TextButton", {Size=UDim2.new(1,-10,0,26), LayoutOrder=idx,
+        BackgroundColor3=Color3.fromRGB(50,50,62), Text=fnDef.name, Font=Enum.Font.Gotham,
+        TextSize=13, TextColor3=Color3.new(1,1,1), BorderSizePixel=0}, listFrame)
+    new("UICorner", {CornerRadius=UDim.new(0,4)}, btn)
+    listButtons[idx] = btn
+    btn.MouseButton1Click:Connect(function()
+        for _, b in ipairs(listButtons) do b.BackgroundColor3 = Color3.fromRGB(50,50,62) end
+        btn.BackgroundColor3 = Color3.fromRGB(90,120,200)
+        running = false
+        buildInputs(fnDef)
+    end)
+end
+
+graphArea:GetPropertyChangedSignal("AbsoluteSize"):Connect(drawGraph)
+
+--========================================================
+-- EXECUTION LOOP (drives WalkSpeed + indicator)
+--========================================================
+local elapsed = 0
+RunService.Heartbeat:Connect(function(dt)
+    local char = player.Character
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    if not running or not selectedFn or not hum then
+        if not running then indicator.Visible = false; elapsed = 0 end
+        return
+    end
+
+    local dur = getDuration()
+    elapsed += dt
+    if elapsed >= dur then
+        if loopOn then elapsed %= dur else running = false; elapsed = dur end
+    end
+
+    local ok, v = pcall(selectedFn.f, elapsed, getParams())
+    local speed = (ok and typeof(v)=="number" and v==v) and math.clamp(v, 0, MAX_SPEED) or hum.WalkSpeed
+    hum.WalkSpeed = speed
+
+    -- position indicator on graph using same normalization as the drawn curve
+    local w, h = graphArea.AbsoluteSize.X, graphArea.AbsoluteSize.Y
+    local raw = math.clamp(ok and v or 0, sampled.min, sampled.max)
+    indicator.Visible = true
+    indicator.Position = UDim2.fromOffset((elapsed/dur)*w, h - ((raw - sampled.min)/(sampled.max - sampled.min))*h)
+    graphInfo.Text = string.format("%s | t = %.2fs | speed = %.1f", selectedFn.name, elapsed, speed)
+
+    if not running then indicator.Visible = false end
+end)
